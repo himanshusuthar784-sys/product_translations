@@ -1,0 +1,92 @@
+{
+  "info": {
+    "name": "Product Translations Migration API",
+    "description": "Run in order: Languages -> Start en -> Status (repeat until completed) -> Start fr / bg. 'Start ...' requests save job_id into the {{job_id}} collection variable, so Status/Batches/Cancel/Retry use it automatically.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8010" },
+    { "key": "job_id", "value": "" },
+    { "key": "product_id", "value": "392" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        { "name": "Liveness", "request": { "method": "GET", "url": "{{baseUrl}}/health" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('ok', () => pm.response.to.have.status(200));"] } }] },
+        { "name": "Readiness (db + redis)", "request": { "method": "GET", "url": "{{baseUrl}}/ready" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('ready', () => pm.response.to.have.status(200));"] } }] }
+      ]
+    },
+    {
+      "name": "Languages",
+      "item": [
+        { "name": "List languages", "request": { "method": "GET", "url": "{{baseUrl}}/languages" } },
+        { "name": "Add language (no schema change)", "request": {
+            "method": "POST", "url": "{{baseUrl}}/languages",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Spanish\",\n  \"language_code\": \"es\"\n}" } } }
+      ]
+    },
+    {
+      "name": "Migration",
+      "item": [
+        { "name": "1. Start - en (import legacy -> products + translations)",
+          "request": { "method": "POST", "url": "{{baseUrl}}/migration/start",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"language_code\": \"en\",\n  \"batch_size\": 2000\n}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('accepted (202) or already active (409)', () => pm.expect([202, 409]).to.include(pm.response.code));",
+            "const b = pm.response.json();",
+            "if (pm.response.code === 202) { pm.collectionVariables.set('job_id', b.job_id); }",
+            "if (pm.response.code === 409) { pm.collectionVariables.set('job_id', b.error.job_id); }"] } }] },
+        { "name": "1b. Start - fr (translate from en)",
+          "request": { "method": "POST", "url": "{{baseUrl}}/migration/start",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"language_code\": \"fr\",\n  \"batch_size\": 2000\n}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const b = pm.response.json();",
+            "if (pm.response.code === 202) { pm.collectionVariables.set('job_id', b.job_id); }",
+            "if (pm.response.code === 409) { pm.collectionVariables.set('job_id', b.error.job_id); }"] } }] },
+        { "name": "1c. Start - bg (translate from en)",
+          "request": { "method": "POST", "url": "{{baseUrl}}/migration/start",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"language_code\": \"bg\",\n  \"batch_size\": 2000\n}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const b = pm.response.json();",
+            "if (pm.response.code === 202) { pm.collectionVariables.set('job_id', b.job_id); }",
+            "if (pm.response.code === 409) { pm.collectionVariables.set('job_id', b.error.job_id); }"] } }] },
+        { "name": "1d. Start - fr with an idempotency key (send twice!)",
+          "request": { "method": "POST", "url": "{{baseUrl}}/migration/start",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"language_code\": \"fr\",\n  \"idempotency_key\": \"fr-import-demo-1\"\n}" } },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const b = pm.response.json();",
+            "pm.test('first call 202 created=true, repeat 200 created=false', () => { if (pm.response.code === 202) pm.expect(b.created).to.eql(true); else { pm.response.to.have.status(200); pm.expect(b.created).to.eql(false);} });",
+            "if (b.job_id) pm.collectionVariables.set('job_id', b.job_id);"] } }] },
+        { "name": "2. Status (poll me)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/migration/status/{{job_id}}" },
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const b = pm.response.json();",
+            "pm.test('has progress fields', () => { ['job_id','status','processed_records','total_records','progress_percentage'].forEach(k => pm.expect(b).to.have.property(k)); });",
+            "console.log(b.status + ' ' + b.processed_records + '/' + b.total_records + ' (' + b.progress_percentage + '%)');"] } }] },
+        { "name": "List jobs", "request": { "method": "GET", "url": { "raw": "{{baseUrl}}/migration/jobs?limit=20", "host": ["{{baseUrl}}"], "path": ["migration", "jobs"], "query": [{ "key": "limit", "value": "20" }, { "key": "language_code", "value": "fr", "disabled": true }, { "key": "status", "value": "running", "disabled": true }] } } },
+        { "name": "List batches of job", "request": { "method": "GET", "url": { "raw": "{{baseUrl}}/migration/jobs/{{job_id}}/batches", "host": ["{{baseUrl}}"], "path": ["migration", "jobs", "{{job_id}}", "batches"], "query": [{ "key": "status", "value": "failed", "disabled": true }] } } },
+        { "name": "Cancel job", "request": { "method": "POST", "url": "{{baseUrl}}/migration/jobs/{{job_id}}/cancel" } },
+        { "name": "Retry failed batches", "request": { "method": "POST", "url": "{{baseUrl}}/migration/jobs/{{job_id}}/retry" } }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        { "name": "Get product (en)", "request": { "method": "GET", "url": "{{baseUrl}}/products/{{product_id}}?lang=en" } },
+        { "name": "Get product (fr, falls back to en for missing keys)", "request": { "method": "GET", "url": "{{baseUrl}}/products/{{product_id}}?lang=fr" } },
+        { "name": "Human edit + brand-new field (no schema change)", "request": {
+            "method": "PUT", "url": "{{baseUrl}}/products/{{product_id}}/translations/fr",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"translations\": {\n    \"title\": \"Vases en verre IMAX - lot de 2\",\n    \"features\": \"Verre soufflé à la bouche\"\n  }\n}" } } }
+      ]
+    }
+  ]
+}

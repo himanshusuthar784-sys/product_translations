@@ -1,0 +1,73 @@
+name: si-translations
+
+x-app: &app
+  build: .
+  image: si-app:dev
+  env_file: .env
+  extra_hosts:
+    - "host.docker.internal:host-gateway"   # reach the existing tdebiz-redis-1 published on the host
+  volumes:
+    - ./:/app            # dev convenience; remove for a pure-image deployment
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  si-db:
+    image: postgres:16.3-bullseye
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT_HOST:-5433}:5432"   # 5433: tdebiz-db-1 already owns 5432
+    volumes:
+      - si_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: apply Alembic migrations before api/worker start.
+  migrate:
+    build: .
+    image: si-app:dev
+    env_file: .env
+    volumes:
+      - ./:/app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      si-db:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    ports:
+      - "${API_PORT_HOST:-8010}:8000"   # 8010: tdebiz-backend-1 already owns 8000
+    command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  # Stateless: scale with `docker compose up -d --scale worker=3`
+  worker:
+    <<: *app
+    command: >
+      celery -A app.workers.celery_app:celery_app worker
+      --loglevel=INFO --concurrency=4 --queues=${CELERY_QUEUE:-si_migration}
+      --hostname=worker@%h
+
+  # Exactly one beat. The reaper is additionally guarded by a PG advisory lock.
+  beat:
+    <<: *app
+    command: >
+      celery -A app.workers.celery_app:celery_app beat
+      --loglevel=INFO --schedule=/tmp/celerybeat-schedule
+
+  # Ad-hoc tooling: docker compose run --rm tools python scripts/load_legacy.py
+  tools:
+    <<: *app
+    profiles: ["tools"]
+    entrypoint: []
+    command: ["python", "-c", "print('use: docker compose run --rm tools <cmd>')"]
+
+volumes:
+  si_pgdata:

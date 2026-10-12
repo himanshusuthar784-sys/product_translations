@@ -1,0 +1,14 @@
+# secrets / local config
+.env
+.env.bak
+
+# python / test caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# supplied assessment materials and generated dataset (not source code; ~11 MB)
+*.mhtml
+data/
+*.docx
